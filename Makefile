@@ -7,6 +7,7 @@ OBJS = \
 PGFILEDESC = "pg_extension - template for future extensions"
 
 EXTENSION = pg_extension
+DATA = pg_extension--0.1.sql
 
 ifdef USE_PGXS
 PG_CONFIG ?= pg_config
