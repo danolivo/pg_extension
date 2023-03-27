@@ -88,11 +88,11 @@ post_parse_analyze_hook_ext(ParseState *pstate,
 	{
 		List *clocations;
 
-		if (query->queryId == UINT64CONST(0))
-			jstate = JumbleQuery(query, pstate->p_sourcetext);
 		if (INSERT_QUERYID(query, query->queryId, false) == NULL)
 			elog(PANIC, "post_parse_analyze_hook_ext");
-		clocations = serialize_clocations(jstate);
+
+		clocations = jstate ? serialize_clocations(jstate) : NIL;
+
 		if (INSERT_CLOCATIONS(query, clocations) == NULL)
 			elog(PANIC, "post_parse_analyze_hook_ext1");
 	}
