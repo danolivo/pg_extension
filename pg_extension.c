@@ -19,28 +19,88 @@ static ExecutorEnd_hook_type		prev_ExecutorEnd_hook			= NULL;
 
 void _PG_init(void);
 
+#define GET_QUERYID(extdata) \
+	(Bigint *) GetExtensionData(extdata, "pge-queryid")
+
+#define INSERT_QUERYID(node, queryid, replaceDuplicate) \
+	AddExtensionDataToNode((Node *) node, "pge-queryid", \
+						   (Node *) makeBigint((int64) queryid), \
+						   replaceDuplicate, true)
+
+#define GET_CLOCATIONS(extdata) \
+	(List *) GetExtensionData(extdata, "pge-clocations")
+
+#define INSERT_CLOCATIONS(node, clocations) \
+	AddExtensionDataToNode((Node *) node, "pge-clocations", \
+						   (Node *) clocations, \
+						   false, true)
+
+static List *
+serialize_clocations(JumbleState *jstate)
+{
+	int  i;
+	List *clocations = list_make1_int(jstate->highest_extern_param_id);
+
+	for (i = 0; i < jstate->clocations_count; i++)
+	{
+		clocations = lappend_int(clocations, jstate->clocations[i].length);
+	}
+	return clocations;
+}
+
+static JumbleState *
+deserialize_clocations(List *clocations)
+{
+	JumbleState *jstate = palloc(sizeof(JumbleState));
+	ListCell *lc;
+	int  i = 0;
+
+	jstate->jumble = NULL;
+	jstate->jumble_len = 0;
+	jstate->clocations_count = list_length(clocations) - 1;
+	jstate->clocations = palloc(sizeof(LocationLen) * jstate->clocations_count);
+	jstate->clocations_buf_size = jstate->clocations_count;
+
+	foreach (lc, clocations)
+	{
+		if (i == 0)
+			jstate->highest_extern_param_id = lfirst_int(lc);
+		else
+		{
+			jstate->clocations[i - 1].length = lfirst_int(lc);
+			jstate->clocations[i - 1].location = -1;
+		}
+	}
+	return jstate;
+}
 
 static void
 post_parse_analyze_hook_ext(ParseState *pstate,
 							Query *query,
 							JumbleState *jstate)
 {
-	Integer *i = makeNode(Integer);
-	intVal(i) = 42;
+	Bigint *i;
 
-	/*XXX: Add check with GetExtensionData here ? */
+	if (!IsQueryIdEnabled())
+		goto std;
 
-	AddExtensionDataToNode((Node *) query,
-							PG_EXTENSION_NAME,
-							(Node *) i,
-							false);
+	if ((i = GET_QUERYID(query->ext_field)) == NULL)
+	{
+		List *clocations;
 
+		if (query->queryId == UINT64CONST(0))
+			jstate = JumbleQuery(query, pstate->p_sourcetext);
+		if (INSERT_QUERYID(query, query->queryId, false) == NULL)
+			elog(PANIC, "post_parse_analyze_hook_ext");
+		clocations = serialize_clocations(jstate);
+		if (INSERT_CLOCATIONS(query, clocations) == NULL)
+			elog(PANIC, "post_parse_analyze_hook_ext1");
+	}
+
+std:
 	if (prev_post_parse_analyze_hook)
 		prev_post_parse_analyze_hook(pstate, query, jstate);
 
-	i = (Integer *) GetExtensionData(query->ext_field, PG_EXTENSION_NAME);
-	if (!i || intVal(i) != 42)
-		elog(PANIC, "pg_extension: Something goes wrong in post_parse_analyze_hook_ext");
 }
 
 static PlannedStmt *
@@ -48,21 +108,20 @@ planner_hook_ext(Query *parse, const char *query_string, int cursorOptions,
 				 ParamListInfo boundParams)
 {
 	PlannedStmt *result;
-	Integer *i;
+	Bigint		*i;
+	List		*clocations;
+	JumbleState *jstate;
 
-	i = (Integer *) GetExtensionData(parse->ext_field, PG_EXTENSION_NAME);
-	if (i && intVal(i) != 42)
-		elog(PANIC, "pg_extension: Something goes wrong in post_parse_analyze_hook_ext");
-	else
-	{
-		i = makeNode(Integer);
-		intVal(i) = 42;
-		AddExtensionDataToNode((Node *) parse,
-						PG_EXTENSION_NAME,
-						(Node *) i,
-						false);
-	}
+	if (!IsQueryIdEnabled())
+		goto std;
 
+	if ((i = GET_QUERYID(parse->ext_field)) == NULL ||
+		(clocations = GET_CLOCATIONS(parse->ext_field)) == NULL)
+		elog(PANIC, "Error in planner_hook_ext");
+	jstate = deserialize_clocations(clocations);
+	Assert(jstate->clocations_count >= 0);
+
+std:
 	if (prev_planner_hook)
 		result = prev_planner_hook(parse, query_string, cursorOptions,
 								   boundParams);
@@ -70,89 +129,99 @@ planner_hook_ext(Query *parse, const char *query_string, int cursorOptions,
 		result = standard_planner(parse, query_string, cursorOptions,
 								  boundParams);
 
-	i = (Integer *) GetExtensionData(parse->ext_field, PG_EXTENSION_NAME);
-	if (!i || intVal(i) != 42)
-	{
-		if (query_string[0] != 0)
-			elog(PANIC, "pg_extension: Something goes wrong in post_parse_analyze_hook_ext");
-	}
-
 	return result;
 }
 
 static void
 ExecutorStart_hook_ext(QueryDesc *queryDesc, int eflags)
 {
-	Integer *i;
+	Bigint *i;
+	List *clocations;
+	JumbleState *jstate;
 
-	i = (Integer *) GetExtensionData(queryDesc->plannedstmt->ext_field, PG_EXTENSION_NAME);
-	if (i && intVal(i) != 42)
-		elog(PANIC, "pg_extension: Something goes wrong in ExecutorStart_hook_ext");
+	if (!IsQueryIdEnabled())
+		goto std;
 
+	if ((i = GET_QUERYID(queryDesc->plannedstmt->ext_field)) == NULL ||
+		(clocations = GET_CLOCATIONS(queryDesc->plannedstmt->ext_field)) == NULL)
+		elog(PANIC, "Error in ExecutorStart_hook_ext");
+	jstate = deserialize_clocations(clocations);
+	Assert(jstate->clocations_count >= 0);
+
+std:
 	if (prev_ExecutorStart_hook)
 		prev_ExecutorStart_hook(queryDesc, eflags);
 	else
 		standard_ExecutorStart(queryDesc, eflags);
-
-	i = (Integer *) GetExtensionData(queryDesc->plannedstmt->ext_field, PG_EXTENSION_NAME);
-	if (i && intVal(i) != 42)
-		elog(PANIC, "pg_extension: Something goes wrong in ExecutorStart_hook_ext");
 }
 
 static void
 ExecutorRun_hook_ext(QueryDesc *queryDesc, ScanDirection direction,
 					 uint64 count, bool execute_once)
 {
-	Integer *i;
+	Bigint *i;
+	List *clocations;
+	JumbleState *jstate;
 
-	i = (Integer *) GetExtensionData(queryDesc->plannedstmt->ext_field, PG_EXTENSION_NAME);
-	if (i && intVal(i) != 42)
-		elog(PANIC, "pg_extension: Something goes wrong in ExecutorRun_hook_ext");
+	if (!IsQueryIdEnabled())
+		goto std;
 
+	if ((i = GET_QUERYID(queryDesc->plannedstmt->ext_field)) == NULL ||
+		(clocations = GET_CLOCATIONS(queryDesc->plannedstmt->ext_field)) == NULL)
+		elog(PANIC, "Error in ExecutorRun_hook_ext");
+	jstate = deserialize_clocations(clocations);
+	Assert(jstate->clocations_count >= 0);
+
+std:
 	if (prev_ExecutorRun_hook)
 		prev_ExecutorRun_hook(queryDesc, direction, count, execute_once);
 	else
 		standard_ExecutorRun(queryDesc, direction, count, execute_once);
-
-	i = (Integer *) GetExtensionData(queryDesc->plannedstmt->ext_field, PG_EXTENSION_NAME);
-	if (i && intVal(i) != 42)
-		elog(PANIC, "pg_extension: Something goes wrong in ExecutorRun_hook_ext");
 }
 
 static void
 ExecutorFinish_hook_ext(QueryDesc *queryDesc)
 {
-	Integer *i;
+	Bigint *i;
+	List *clocations;
+	JumbleState *jstate;
 
-	i = (Integer *) GetExtensionData(queryDesc->plannedstmt->ext_field, PG_EXTENSION_NAME);
-	if (i && intVal(i) != 42)
-		elog(PANIC, "pg_extension: Something goes wrong in ExecutorFinish_hook_ext");
+	if (!IsQueryIdEnabled())
+		goto std;
 
+	if ((i = GET_QUERYID(queryDesc->plannedstmt->ext_field)) == NULL ||
+		(clocations = GET_CLOCATIONS(queryDesc->plannedstmt->ext_field)) == NULL)
+		elog(PANIC, "Error in ExecutorFinish_hook_ext");
+	jstate = deserialize_clocations(clocations);
+	Assert(jstate->clocations_count >= 0);
+
+std:
 	if (prev_ExecutorFinish_hook)
 		(*prev_ExecutorFinish_hook) (queryDesc);
 	else
 		standard_ExecutorFinish(queryDesc);
-
-	i = (Integer *) GetExtensionData(queryDesc->plannedstmt->ext_field, PG_EXTENSION_NAME);
-	if (i && intVal(i) != 42)
-		elog(PANIC, "pg_extension: Something goes wrong in ExecutorFinish_hook_ext");
 }
 
 static void
 ExecutorEnd_hook_ext(QueryDesc *queryDesc)
 {
-	Integer *i;
+	Bigint *i;
+	List *clocations;
+	JumbleState *jstate;
 
-	i = (Integer *) GetExtensionData(queryDesc->plannedstmt->ext_field, PG_EXTENSION_NAME);
-	if (i && intVal(i) != 42)
-		elog(PANIC, "pg_extension: Something goes wrong in ExecutorEnd_hook_ext");
+	if (!IsQueryIdEnabled())
+		goto std;
 
+	if ((i = GET_QUERYID(queryDesc->plannedstmt->ext_field)) == NULL ||
+		(clocations = GET_CLOCATIONS(queryDesc->plannedstmt->ext_field)) == NULL)
+		elog(PANIC, "Error in ExecutorEnd_hook_ext");
+	jstate = deserialize_clocations(clocations);
+	Assert(jstate->clocations_count >= 0);
+std:
 	if (prev_ExecutorEnd_hook)
 		prev_ExecutorEnd_hook(queryDesc);
 	else
 		standard_ExecutorEnd(queryDesc);
-
-	/* Query plan should be cleaned up here. XXX: Does check? */
 }
 
 void
@@ -175,6 +244,8 @@ _PG_init(void)
 
 	prev_ExecutorEnd_hook			=	ExecutorEnd_hook;
 	ExecutorEnd_hook				=	ExecutorEnd_hook_ext;
+
+	EnableQueryId();
 
 	elog(LOG, "Template extension was initialized.");
 }
