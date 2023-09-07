@@ -7,6 +7,7 @@ OBJS = \
 PGFILEDESC = "pg_extension - template for future extensions"
 
 EXTENSION = pg_extension
+EXTVERSION = 1.0
 
 ifdef USE_PGXS
 PG_CONFIG ?= pg_config

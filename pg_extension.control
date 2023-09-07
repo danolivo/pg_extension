@@ -2,3 +2,4 @@
 comment = 'Template for new extensions'
 module_pathname = '$libdir/pg_extension'
 relocatable = true
+default_version = '1.0'
