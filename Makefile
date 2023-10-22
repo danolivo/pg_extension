@@ -6,6 +6,7 @@ OBJS = \
 	pg_extension.o
 PGFILEDESC = "pg_extension - template for future extensions"
 
+REGRESS = basic
 EXTENSION = pg_extension
 DATA = pg_extension--0.1.sql
 
